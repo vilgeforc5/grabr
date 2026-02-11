@@ -74,7 +74,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	fs.StringVar(&cfg.options.CloneDir, "clone-dir", defaults.CloneDir, "Directory to clone repo into (must be empty)")
 	fs.BoolVar(&cfg.options.SkipGitleaks, "skip-gitleaks", defaults.SkipGitleaks, "Skip gitleaks scan")
 	fs.BoolVar(&cfg.options.SkipTrufflehog, "skip-trufflehog", defaults.SkipTrufflehog, "Skip trufflehog scan")
-	fs.BoolVar(&cfg.options.SkipHeuristics, "skip-heuristics", defaults.SkipHeuristics, "Skip custom token heuristics scan")
+	fs.BoolVar(&cfg.options.SkipHeuristics, "skip-heuristics", defaults.SkipHeuristics, "Skip custom token heuristics scan (git history)")
 	fs.BoolVar(&cfg.options.IncludeNodeModules, "include-node-modules", defaults.IncludeNodeModules, "Include findings in node_modules paths")
 	fs.StringVar(&cfg.options.TokenNames, "token-names", "", "Token variable names string (comma/space/newline/semicolon separated). Empty means load from pkg/token_names.json")
 	fs.IntVar(&cfg.options.MinTokenLength, "heuristic-min-token-length", grabr.DefaultMinTokenLen, "Minimum token length for heuristic detection")
@@ -140,7 +140,7 @@ Flags:
   -output string
     	Path to output JSON report
   -skip-heuristics
-    	Skip custom token heuristics scan
+    	Skip custom token heuristics scan (git history)
   -skip-gitleaks
     	Skip gitleaks scan
   -skip-trufflehog

@@ -254,7 +254,7 @@ func Run(ctx context.Context, opts Options) (Report, error) {
 	}
 
 	if !cfg.skipHeuristics {
-		cfg.log.infof("Running heuristic token scan...")
+		cfg.log.infof("Running heuristic token scan over git history...")
 		cfg.log.debugf("heuristic token names loaded: %d", cfg.tokenNameCount)
 		out, err := runHeuristicTokenScan(repoDir, cfg, cfg.log)
 		if err != nil {

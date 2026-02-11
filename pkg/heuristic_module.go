@@ -1,6 +1,8 @@
 package grabr
 
 import (
+	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -32,7 +34,7 @@ type tokenNamesDocument struct {
 
 type checkStrategy interface {
 	Name() string
-	Check(relPath string, line string, lineNo int, cfg config) []finding
+	Check(commit string, relPath string, line string, lineNo int, cfg config) []finding
 }
 
 type tokenHeuristic struct{}
@@ -137,86 +139,212 @@ func resolveTokenNamesPath() (string, error) {
 
 func runHeuristicTokenScan(repoDir string, cfg config, log logger) (scannerOutput, error) {
 	var out scannerOutput
-	contextResolver := newCodeContextResolver(repoDir)
 	strategies := []checkStrategy{
 		tokenHeuristic{},
 	}
 
-	scannedFiles := 0
-	err := filepath.WalkDir(repoDir, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			out.warnings = append(out.warnings, fmt.Sprintf("heuristic walk warning at %s: %v", path, walkErr))
-			return nil
-		}
-
-		if d.IsDir() {
-			name := d.Name()
-			if name == ".git" {
-				return filepath.SkipDir
-			}
-			if !cfg.includeNodeModules && name == "node_modules" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			return nil
-		}
-
-		info, err := d.Info()
-		if err != nil {
-			out.warnings = append(out.warnings, fmt.Sprintf("heuristic stat warning at %s: %v", path, err))
-			return nil
-		}
-		if info.Size() == 0 || info.Size() > maxHeuristicBytes {
-			return nil
-		}
-
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			out.warnings = append(out.warnings, fmt.Sprintf("heuristic read warning at %s: %v", path, err))
-			return nil
-		}
-		if isLikelyBinary(raw) {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(repoDir, path)
-		if err != nil {
-			relPath = path
-		}
-		relPath = filepath.ToSlash(relPath)
-
-		scannedFiles++
-		lines := strings.Split(string(raw), "\n")
-		for idx, line := range lines {
-			lineNo := idx + 1
-			for _, strategy := range strategies {
-				candidateFindings := strategy.Check(relPath, line, lineNo, cfg)
-				for i := range candidateFindings {
-					if candidateFindings[i].CodeContext == nil {
-						candidateFindings[i].CodeContext = contextResolver.resolve(candidateFindings[i].File, candidateFindings[i].Line)
-					}
-				}
-				out.findings = append(out.findings, candidateFindings...)
-			}
-		}
-		return nil
-	})
+	commits, err := listHeuristicCommits(repoDir, cfg, log)
 	if err != nil {
-		return out, fmt.Errorf("heuristic scan failed: %w", err)
+		return out, fmt.Errorf("heuristic commit listing failed: %w", err)
+	}
+	log.debugf("heuristic commits queued: %d", len(commits))
+
+	scannedFiles := 0
+	for _, commit := range commits {
+		paths, err := listCommitChangedFiles(repoDir, commit, cfg, log)
+		if err != nil {
+			out.warnings = append(out.warnings, fmt.Sprintf("heuristic commit file listing failed for %s: %v", commit, err))
+			continue
+		}
+		for _, relPath := range paths {
+			raw, scanned, warning := readCommitFileContent(repoDir, commit, relPath, cfg, log)
+			if warning != "" {
+				out.warnings = append(out.warnings, warning)
+			}
+			if !scanned {
+				continue
+			}
+			scannedFiles++
+
+			lines := strings.Split(string(raw), "\n")
+			for idx, line := range lines {
+				lineNo := idx + 1
+				for _, strategy := range strategies {
+					candidateFindings := strategy.Check(commit, relPath, line, lineNo, cfg)
+					for i := range candidateFindings {
+						if candidateFindings[i].CodeContext == nil {
+							ctxLine := lineNo
+							if candidateFindings[i].Line != nil && *candidateFindings[i].Line > 0 {
+								ctxLine = *candidateFindings[i].Line
+							}
+							candidateFindings[i].CodeContext = buildCodeContext(lines, ctxLine)
+						}
+						if candidateFindings[i].Metadata == nil {
+							candidateFindings[i].Metadata = map[string]any{}
+						}
+						candidateFindings[i].Metadata["scan_scope"] = "commit_history"
+					}
+					out.findings = append(out.findings, candidateFindings...)
+				}
+			}
+		}
 	}
 
-	log.debugf("heuristic files scanned: %d", scannedFiles)
+	log.debugf("heuristic commits scanned: %d", len(commits))
+	log.debugf("heuristic commit files scanned: %d", scannedFiles)
 	log.infof("heuristic findings: %d", len(out.findings))
 	return out, nil
+}
+
+func listHeuristicCommits(repoDir string, cfg config, log logger) ([]string, error) {
+	res, err := runCmd(context.Background(), cfg.timeout, repoDir, log, "git", "rev-list", "--all", "--reverse")
+	if err != nil {
+		return nil, err
+	}
+	if res.code != 0 {
+		return nil, fmt.Errorf("failed to list commits: %s", strings.TrimSpace(res.stderr))
+	}
+
+	seen := make(map[string]struct{})
+	commits := make([]string, 0, 1024)
+	sc := bufio.NewScanner(strings.NewReader(res.stdout))
+	sc.Buffer(make([]byte, 0, 1024), 1024*1024)
+	for sc.Scan() {
+		commit := strings.TrimSpace(sc.Text())
+		if commit == "" {
+			continue
+		}
+		if _, ok := seen[commit]; ok {
+			continue
+		}
+		seen[commit] = struct{}{}
+		commits = append(commits, commit)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("failed parsing commit list: %w", err)
+	}
+	return commits, nil
+}
+
+func listCommitChangedFiles(repoDir string, commit string, cfg config, log logger) ([]string, error) {
+	res, err := runCmd(
+		context.Background(),
+		cfg.timeout,
+		repoDir,
+		log,
+		"git",
+		"diff-tree",
+		"--root",
+		"--no-commit-id",
+		"--name-only",
+		"-z",
+		"-r",
+		commit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if res.code != 0 {
+		return nil, fmt.Errorf("git diff-tree failed: %s", strings.TrimSpace(res.stderr))
+	}
+
+	seen := make(map[string]struct{})
+	paths := make([]string, 0, 128)
+	rawParts := strings.Split(res.stdout, "\x00")
+	for _, rawPath := range rawParts {
+		path := normalizeGitObjectPath(rawPath)
+		if path == "" {
+			continue
+		}
+		if !cfg.includeNodeModules && pathInNodeModules(path) {
+			continue
+		}
+		if !isCodeLikeFile(path) {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func readCommitFileContent(repoDir string, commit string, relPath string, cfg config, log logger) ([]byte, bool, string) {
+	spec := commit + ":" + relPath
+	sizeRes, err := runCmd(context.Background(), cfg.timeout, repoDir, log, "git", "cat-file", "-s", spec)
+	if err != nil {
+		return nil, false, fmt.Sprintf("heuristic content size check failed for %s %s: %v", commit, relPath, err)
+	}
+	if sizeRes.code != 0 {
+		if isMissingPathAtCommit(sizeRes.stderr) {
+			return nil, false, ""
+		}
+		return nil, false, fmt.Sprintf("heuristic content size check failed for %s %s: %s", commit, relPath, strings.TrimSpace(sizeRes.stderr))
+	}
+
+	size, err := strconv.ParseInt(strings.TrimSpace(sizeRes.stdout), 10, 64)
+	if err != nil {
+		return nil, false, fmt.Sprintf("heuristic content size parse failed for %s %s: %v", commit, relPath, err)
+	}
+	if size == 0 || size > maxHeuristicBytes {
+		return nil, false, ""
+	}
+
+	contentRes, err := runCmd(context.Background(), cfg.timeout, repoDir, log, "git", "cat-file", "-p", spec)
+	if err != nil {
+		return nil, false, fmt.Sprintf("heuristic content read failed for %s %s: %v", commit, relPath, err)
+	}
+	if contentRes.code != 0 {
+		if isMissingPathAtCommit(contentRes.stderr) {
+			return nil, false, ""
+		}
+		return nil, false, fmt.Sprintf("heuristic content read failed for %s %s: %s", commit, relPath, strings.TrimSpace(contentRes.stderr))
+	}
+
+	raw := []byte(contentRes.stdout)
+	if len(raw) == 0 || len(raw) > maxHeuristicBytes {
+		return nil, false, ""
+	}
+	if isLikelyBinary(raw) {
+		return nil, false, ""
+	}
+	return raw, true, ""
+}
+
+func isMissingPathAtCommit(stderr string) bool {
+	msg := strings.ToLower(strings.TrimSpace(stderr))
+	return strings.Contains(msg, "does not exist in") ||
+		(strings.Contains(msg, "path ") && strings.Contains(msg, " not in "))
+}
+
+func normalizeGitObjectPath(raw string) string {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "\"") && strings.HasSuffix(path, "\"") {
+		if unquoted, err := strconv.Unquote(path); err == nil {
+			path = unquoted
+		}
+	}
+	return filepath.ToSlash(path)
+}
+
+func pathInNodeModules(path string) bool {
+	path = filepath.ToSlash(path)
+	return path == "node_modules" ||
+		strings.HasPrefix(path, "node_modules/") ||
+		strings.Contains(path, "/node_modules/")
 }
 
 func (h tokenHeuristic) Name() string {
 	return "tokenHeuristic"
 }
 
-func (h tokenHeuristic) Check(relPath string, line string, lineNo int, cfg config) []finding {
+func (h tokenHeuristic) Check(commit string, relPath string, line string, lineNo int, cfg config) []finding {
 	var out []finding
 	seen := map[string]struct{}{}
 
@@ -229,7 +357,7 @@ func (h tokenHeuristic) Check(relPath string, line string, lineNo int, cfg confi
 		out = append(out, f)
 	}
 
-	if f, ok := h.checkNamedAssignment(relPath, line, lineNo, cfg); ok {
+	if f, ok := h.checkNamedAssignment(commit, relPath, line, lineNo, cfg); ok {
 		add(f)
 	}
 
@@ -261,6 +389,7 @@ func (h tokenHeuristic) Check(relPath string, line string, lineNo int, cfg confi
 		}
 
 		add(newHeuristicFinding(
+			commit,
 			"HeuristicSourceToken",
 			sev,
 			title,
@@ -278,7 +407,7 @@ func (h tokenHeuristic) Check(relPath string, line string, lineNo int, cfg confi
 	return out
 }
 
-func (h tokenHeuristic) checkNamedAssignment(relPath string, line string, lineNo int, cfg config) (finding, bool) {
+func (h tokenHeuristic) checkNamedAssignment(commit string, relPath string, line string, lineNo int, cfg config) (finding, bool) {
 	m := envTokenAssignRe.FindStringSubmatch(line)
 	if len(m) < 3 {
 		return finding{}, false
@@ -292,6 +421,7 @@ func (h tokenHeuristic) checkNamedAssignment(relPath string, line string, lineNo
 		return finding{}, false
 	}
 	return newHeuristicFinding(
+		commit,
 		"HeuristicNamedTokenAssignment",
 		SeverityCritical,
 		fmt.Sprintf("Potential exposed token for %s", varName),
@@ -307,6 +437,7 @@ func (h tokenHeuristic) checkNamedAssignment(relPath string, line string, lineNo
 }
 
 func newHeuristicFinding(
+	commit string,
 	detector string,
 	severity string,
 	title string,
@@ -317,15 +448,16 @@ func newHeuristicFinding(
 ) finding {
 	ln := lineNo
 	preview := maskSecret(value)
-	fingerprint := shortHash("heuristic", detector, relPath, strconv.Itoa(lineNo), preview)
+	fingerprint := shortHash("heuristic", commit, detector, relPath, strconv.Itoa(lineNo), preview)
 	return finding{
-		ID:          shortHash("heuristic", detector, relPath, strconv.Itoa(lineNo), value),
+		ID:          shortHash("heuristic", commit, detector, relPath, strconv.Itoa(lineNo), value),
 		Tool:        "heuristic",
 		Severity:    severity,
 		Title:       title,
 		Detector:    detector,
 		File:        relPath,
 		Line:        &ln,
+		Commit:      commit,
 		Preview:     preview,
 		CodeContext: nil,
 		Fingerprint: "heuristic:" + fingerprint,

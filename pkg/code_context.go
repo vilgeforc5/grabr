@@ -51,6 +51,14 @@ func (r *codeContextResolver) resolve(filePath string, line *int) *CodeContext {
 	}
 
 	idx := *line - 1
+	return buildCodeContext(lines, idx+1)
+}
+
+func buildCodeContext(lines []string, highlightLine int) *CodeContext {
+	if highlightLine <= 0 {
+		return nil
+	}
+	idx := highlightLine - 1
 	if idx < 0 || idx >= len(lines) {
 		return nil
 	}

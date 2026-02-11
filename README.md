@@ -37,7 +37,7 @@ go run . --token-names "BOT_TOKEN MYBOT_TOKEN MAXBOT_TOKEN ..." https://github.c
 -output string
     Path to output JSON report
 -skip-heuristics
-    Skip custom token heuristics scan
+    Skip custom token heuristics scan (git history)
 -skip-gitleaks
     Skip gitleaks scan
 -skip-trufflehog
