@@ -69,6 +69,7 @@ func parseArgs(args []string) (cliConfig, error) {
 	fs.StringVar(&cfg.outputPath, "output", "", "Path to output JSON report")
 	fs.StringVar(&cfg.outputPath, "o", "", "Path to output JSON report")
 	fs.IntVar(&timeoutSec, "timeout", int(grabr.DefaultTimeout.Seconds()), "Timeout in seconds per scanner command")
+	fs.StringVar(&cfg.options.LocalRepoPath, "local-repo", "", "Path to local git repository (alternative to <repo_url>)")
 	fs.BoolVar(&cfg.options.KeepClone, "keep-clone", defaults.KeepClone, "Keep cloned repository directory")
 	fs.StringVar(&cfg.options.CloneDir, "clone-dir", defaults.CloneDir, "Directory to clone repo into (must be empty)")
 	fs.BoolVar(&cfg.options.SkipGitleaks, "skip-gitleaks", defaults.SkipGitleaks, "Skip gitleaks scan")
@@ -87,10 +88,17 @@ func parseArgs(args []string) (cliConfig, error) {
 	}
 
 	rest := fs.Args()
-	if len(rest) != 1 {
-		return cfg, errors.New("usage: grabr [flags] <repo_url> (run 'grabr help')")
+	localRepo := strings.TrimSpace(cfg.options.LocalRepoPath)
+	switch {
+	case localRepo != "" && len(rest) > 0:
+		return cfg, errors.New("use either --local-repo <path> or <repo_url>, not both")
+	case localRepo == "" && len(rest) != 1:
+		return cfg, errors.New("usage: grabr [flags] <repo_url> OR grabr [flags] --local-repo <path> (run 'grabr help')")
+	case localRepo != "":
+		cfg.options.RepoURL = ""
+	default:
+		cfg.options.RepoURL = rest[0]
 	}
-	cfg.options.RepoURL = rest[0]
 	cfg.options.Timeout = time.Duration(timeoutSec) * time.Second
 	cfg.options.LogOutput = os.Stderr
 
@@ -107,10 +115,12 @@ func printHelp(w io.Writer) {
 
 Usage:
   grabr [flags] <repo_url>
+  grabr [flags] --local-repo <path>
   grabr help
 
 Examples:
   go run . https://github.com/OWNER/REPO.git
+  go run . --local-repo /path/to/local/repo
   go run . --log-level DEBUG --output report.json https://github.com/OWNER/REPO.git
   go run . --token-names "BOT_TOKEN MYBOT_TOKEN MAXBOT_TOKEN ..." https://github.com/OWNER/REPO.git
 
@@ -121,6 +131,8 @@ Flags:
     	Include findings in node_modules paths
   -keep-clone
     	Keep cloned repository directory
+  -local-repo string
+    	Path to local git repository (alternative to <repo_url>)
   -log-level string
     	Log level: INFO or DEBUG (default "INFO")
   -o string

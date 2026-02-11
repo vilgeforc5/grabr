@@ -6,6 +6,7 @@
 
 ```text
 grabr [flags] <repo_url>
+grabr [flags] --local-repo <path>
 grabr help
 ```
 
@@ -13,6 +14,7 @@ grabr help
 
 ```bash
 go run . https://github.com/OWNER/REPO.git
+go run . --local-repo /path/to/local/repo
 go run . --log-level DEBUG --output report.json https://github.com/OWNER/REPO.git
 go run . --token-names "BOT_TOKEN MYBOT_TOKEN MAXBOT_TOKEN ..." https://github.com/OWNER/REPO.git
 ```
@@ -26,6 +28,8 @@ go run . --token-names "BOT_TOKEN MYBOT_TOKEN MAXBOT_TOKEN ..." https://github.c
     Include findings in node_modules paths
 -keep-clone
     Keep cloned repository directory
+-local-repo string
+    Path to local git repository (alternative to <repo_url>)
 -log-level string
     Log level: INFO or DEBUG (default "INFO")
 -o string
