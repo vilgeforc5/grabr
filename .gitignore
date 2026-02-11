@@ -1,0 +1,28 @@
+# Binaries
+/grabr
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Scan outputs
+/scan-report-*.json
+
+# Coverage
+coverage.out
+*.coverprofile
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
